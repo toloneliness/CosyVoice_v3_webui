@@ -58,16 +58,82 @@ def change_instruction(mode_checkbox_group):
 
 # 修复重复音色列表问题
 def refresh_sft_spk():
-    """刷新音色选择列表 - 修复重复音色问题"""
-    # cosyvoice.list_available_spks()已经返回了所有音色（包括自定义和预训练的）
-    # 因为save_custom_spk函数会将自定义音色添加到cosyvoice.frontend.spk2info中
-    choices = cosyvoice.list_available_spks()
+    """刷新音色选择列表 - 修复重复音色问题并自动注册新文件"""
+    try:
+        # 确保音色信息是最新的
+        if hasattr(cosyvoice.frontend, 'load_spkinfo'):
+            cosyvoice.frontend.load_spkinfo()
 
-    if not choices:
-        choices = ['']
+        # 获取当前已注册的音色列表
+        current_choices = cosyvoice.list_available_spks()
 
-    return {"choices": choices, "__type__": "update"}
+        # 扫描自定义音色目录，检测新文件
+        custom_voices_dir = os.path.join(cosyvoice.model_dir, 'custom_voices')
+        if os.path.exists(custom_voices_dir):
+            # 获取目录中的所有 .pt 文件
+            for file_name in os.listdir(custom_voices_dir):
+                if file_name.endswith('.pt'):
+                    spk_name = file_name[:-3]  # 去掉 .pt 后缀
 
+                    # 检查是否已经注册
+                    if spk_name not in current_choices:
+                        # 新文件，需要注册
+                        voice_path = os.path.join(custom_voices_dir, file_name)
+                        try:
+                            # 加载音色文件
+                            custom_voice_info = torch.load(voice_path, map_location='cpu')
+
+                            # 注册到系统中
+                            if hasattr(cosyvoice.frontend, 'spk2info'):
+                                # 创建音色信息结构
+                                model_input = {
+                                    'embedding': custom_voice_info.get('embedding'),
+                                    'llm_embedding': custom_voice_info.get('embedding'),
+                                    'sample_rate': custom_voice_info.get('sample_rate', 16000),
+                                    'speaker_name': spk_name
+                                }
+
+                                # 添加到spk2info字典
+                                cosyvoice.frontend.spk2info[spk_name] = model_input
+                                logging.info(f"自动注册新音色: {spk_name}")
+
+                        except Exception as e:
+                            logging.warning(f"注册音色 {spk_name} 时出错: {e}")
+
+            # 保存更新后的spk2info
+            cosyvoice.save_spkinfo()
+
+        # 重新获取更新后的音色列表
+        choices = cosyvoice.list_available_spks()
+
+        # 额外检查：确保自定义音色文件存在，如果文件不存在但还在列表中，则过滤掉
+        if hasattr(cosyvoice.frontend, 'spk2info'):
+            valid_choices = []
+
+            for spk in choices:
+                # 检查是否为自定义音色（通过检查文件是否存在）
+                voice_path = os.path.join(custom_voices_dir, f"{spk}.pt")
+                if os.path.exists(voice_path) or spk not in cosyvoice.frontend.spk2info:
+                    # 文件存在，或者是预训练音色，保留
+                    valid_choices.append(spk)
+                else:
+                    # 文件不存在但还在spk2info中，需要清理
+                    logging.warning(f"音色 '{spk}' 的文件不存在，将从列表中移除")
+                    if spk in cosyvoice.frontend.spk2info:
+                        del cosyvoice.frontend.spk2info[spk]
+
+            choices = valid_choices
+            # 保存清理后的spk2info
+            cosyvoice.save_spkinfo()
+
+        if not choices:
+            choices = ['']
+
+        return {"choices": choices, "__type__": "update"}
+
+    except Exception as e:
+        logging.error(f"刷新音色列表时出错: {e}")
+        return {"choices": [''], "__type__": "update"}
 
 def delete_custom_spk(selected_spk):
     """删除选中的自定义音色"""
@@ -91,7 +157,20 @@ def delete_custom_spk(selected_spk):
             # 保存更新后的spk2info
             cosyvoice.save_spkinfo()
 
-        return f"✅ 音色 '{selected_spk}' 删除成功"
+        # 强制刷新音色列表，确保注册信息同步更新
+        # 重新加载音色列表，确保删除操作生效
+        try:
+            # 调用模型的音色列表刷新方法
+            if hasattr(cosyvoice, 'refresh_spk_list'):
+                cosyvoice.refresh_spk_list()
+
+            # 如果模型有重新加载音色信息的方法，调用它
+            if hasattr(cosyvoice.frontend, 'load_spkinfo'):
+                cosyvoice.frontend.load_spkinfo()
+        except Exception as e:
+            logging.warning(f"刷新音色列表时出现警告: {e}")
+
+        return f"✅ 音色 '{selected_spk}' 删除成功，注册信息已同步更新"
 
     except Exception as e:
         return f"❌ 删除失败: {str(e)}"
